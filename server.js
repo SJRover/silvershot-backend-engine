@@ -20,7 +20,7 @@ const UserSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true, lowercase: true },
     passwordHash: { type: String, required: true },
     fullName: { type: String, default: 'Anonymous Creator' },
-    bio: { type: String, default: 'Executing network modules inside cloud spaces.' },
+    bio: { type: String, default: 'Sharing creative media items across the network.' },
     age: { type: Number, default: 24 },
     status: { type: String, default: 'Single' },
     country: { type: String, default: 'United Kingdom' },
@@ -84,7 +84,7 @@ app.delete('/api/admin/posts/:postId', async (req, res) => {
             return res.status(403).json({ error: 'Security Exception: Denied administrative authority access.' });
         }
         await ActivePost.findByIdAndDelete(req.params.postId);
-        res.json({ message: 'Content asset removed successfully by administrative moderation action.' });
+        res.json({ message: 'Post removed successfully by administrative moderation action.' });
     } catch (err) {
         res.status(500).json({ error: 'Administrative post deletion channel failed.' });
     }
@@ -100,9 +100,9 @@ app.delete('/api/admin/users/:targetUsername', async (req, res) => {
         const offender = req.params.targetUsername.toLowerCase();
         await User.findOneAndDelete({ username: offender });
         await ActivePost.deleteMany({ username: offender });
-        res.json({ message: 'Offensive account handle profile and associated assets purged cleanly.' });
+        res.json({ message: 'User profile and associated posts removed cleanly.' });
     } catch (err) {
-        res.status(500).json({ error: 'Administrative account purge channel failed.' });
+        res.status(500).json({ error: 'Administrative account deletion channel failed.' });
     }
 });
 
@@ -113,7 +113,7 @@ app.get('/api/notifications/:username', async (req, res) => {
         const list = await Notification.find({ username: targetUser }).sort({ createdAt: -1 });
         res.json(list);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch tracking metrics.' });
+        res.status(500).json({ error: 'Failed to fetch user updates.' });
     }
 });
 
@@ -151,11 +151,17 @@ app.post('/api/posts/react', async (req, res) => {
     try {
         const { postId, username, reactionType } = req.body;
         const targetPost = await ActivePost.findById(postId);
-        if (!targetPost) return res.status(404).json({ error: 'Target timeline asset unresolved.' });
+        if (!targetPost) return res.status(404).json({ error: 'Post not found.' });
 
         const userToken = username.trim().toLowerCase();
+        
+        // SELF-REACTION PROTECTION LAYER
+        if (targetPost.username.toLowerCase() === userToken) {
+            return res.status(403).json({ error: 'Interaction restricted: You cannot react to your own upload.' });
+        }
+
         const profile = await User.findOne({ username: userToken });
-        if (!profile) return res.status(404).json({ error: 'User node unverified.' });
+        if (!profile) return res.status(404).json({ error: 'User not found.' });
 
         const timestampNow = new Date();
         let createdNewReaction = false;
@@ -173,7 +179,7 @@ app.post('/api/posts/react', async (req, res) => {
             const timePassed = profile.lastMedalUsedAt ? (timestampNow - new Date(profile.lastMedalUsedAt)) : Infinity;
             const hoursRemaining = 24 - (timePassed / (1000 * 60 * 60));
             if (hoursRemaining > 0 && !targetPost.medaledBy.includes(userToken)) {
-                return res.status(403).json({ error: 'Medal resource locked inside reload cycle constraint.' });
+                return res.status(403).json({ error: 'Medal selection is locked during the cooldown period.' });
             }
             if (targetPost.medaledBy.includes(userToken)) {
                 targetPost.medaledBy = targetPost.medaledBy.filter(u => u !== userToken);
@@ -189,7 +195,7 @@ app.post('/api/posts/react', async (req, res) => {
             const timePassed = profile.lastBroccoliUsedAt ? (timestampNow - new Date(profile.lastBroccoliUsedAt)) : Infinity;
             const hoursRemaining = 24 - (timePassed / (1000 * 60 * 60));
             if (hoursRemaining > 0 && !targetPost.broccoliedBy.includes(userToken)) {
-                return res.status(403).json({ error: 'Broccoli resource locked inside reload cycle constraint.' });
+                return res.status(403).json({ error: 'Broccoli selection is locked during the cooldown period.' });
             }
             if (targetPost.broccoliedBy.includes(userToken)) {
                 targetPost.broccoliedBy = targetPost.broccoliedBy.filter(u => u !== userToken);
@@ -223,11 +229,11 @@ app.post('/api/posts/react', async (req, res) => {
             lastBroccoliUsedAt: profile.lastBroccoliUsedAt
         });
     } catch (err) {
-        res.status(500).json({ error: 'Metric pipeline modification failure.' });
+        res.status(500).json({ error: 'Failed to update post reaction.' });
     }
 });
 
-// --- INDEX MULTI-TIER SEARCH ENDPOINT ---
+// --- SEARCH ENDPOINT ---
 app.get('/api/search', async (req, res) => {
     try {
         const rawQuery = req.query.q ? req.query.q.trim().toLowerCase() : '';
@@ -266,7 +272,7 @@ app.get('/api/search', async (req, res) => {
 
         res.json({ users: categorizedUsers, posts: categorizedPosts });
     } catch (err) {
-        res.status(500).json({ error: 'Search infrastructure computation failure.' });
+        res.status(500).json({ error: 'Search system error.' });
     }
 });
 
@@ -277,10 +283,10 @@ app.post('/api/auth/register', async (req, res) => {
         const normalizedHandle = username.trim().toLowerCase();
 
         const handleMatch = await User.findOne({ username: normalizedHandle });
-        if (handleMatch) return res.status(400).json({ error: 'Conflict Protocol: Username already allocated.' });
+        if (handleMatch) return res.status(400).json({ error: 'Username is already taken.' });
 
         const emailMatch = await User.findOne({ email: email.toLowerCase() });
-        if (emailMatch) return res.status(400).json({ error: 'Conflict Protocol: Email linked to existing node.' });
+        if (emailMatch) return res.status(400).json({ error: 'Email is linked to an existing account.' });
 
         const salt = await bcrypt.genSalt(10);
         const hashed = await bcrypt.hash(password, salt);
@@ -289,13 +295,13 @@ app.post('/api/auth/register', async (req, res) => {
             username: normalizedHandle,
             email: email.toLowerCase(),
             passwordHash: hashed,
-            fullName: username + " Persona"
+            fullName: username
         });
 
         await newAccount.save();
-        res.json({ message: 'Account instantiation parameter completed successfully.' });
+        res.json({ message: 'Registration finished successfully.' });
     } catch (err) {
-        res.status(500).json({ error: 'Server processing failure.' });
+        res.status(500).json({ error: 'Server registration failed.' });
     }
 });
 
@@ -305,10 +311,10 @@ app.post('/api/auth/login', async (req, res) => {
         const queryStr = loginInput.trim().toLowerCase();
 
         let accountMatch = await User.findOne({ username: queryStr }) || await User.findOne({ email: queryStr });
-        if (!accountMatch) return res.status(400).json({ error: 'Security Warning: Identity configuration unresolved.' });
+        if (!accountMatch) return res.status(400).json({ error: 'Account credentials not found.' });
 
         const checkPass = await bcrypt.compare(password, accountMatch.passwordHash);
-        if (!checkPass) return res.status(400).json({ error: 'Security Warning: Credential matching criteria failed.' });
+        if (!checkPass) return res.status(400).json({ error: 'Incorrect password.' });
 
         const activeUpload = await ActivePost.findOne({ username: accountMatch.username });
 
@@ -333,7 +339,7 @@ app.post('/api/auth/login', async (req, res) => {
             activePost: activeUpload
         });
     } catch (err) {
-        res.status(500).json({ error: 'Server validation loop error.' });
+        res.status(500).json({ error: 'Server authentication failed.' });
     }
 });
 
@@ -347,12 +353,12 @@ app.put('/api/profile/update', async (req, res) => {
             { new: true }
         );
         
-        if (!profile) return res.status(404).json({ error: 'Profile metadata unresolved.' });
+        if (!profile) return res.status(404).json({ error: 'Profile not found.' });
         await ActivePost.updateMany({ username: profile.username }, { fullName: profile.fullName, avatarImg: profile.avatarString });
         
-        res.json({ message: 'Profile variables saved.', user: profile });
+        res.json({ message: 'Profile updates saved.', user: profile });
     } catch (err) {
-        res.status(500).json({ error: 'Failed to save updated profile variables.' });
+        res.status(500).json({ error: 'Failed to save profile changes.' });
     }
 });
 
@@ -361,7 +367,7 @@ app.post('/api/posts/upload', async (req, res) => {
         const { username, img, category, caption, hashtags } = req.body;
 
         const profile = await User.findOne({ username });
-        if (!profile) return res.status(404).json({ error: 'Profile verification reference empty.' });
+        if (!profile) return res.status(404).json({ error: 'User workspace not found.' });
 
         await ActivePost.deleteMany({ username });
 
@@ -397,9 +403,9 @@ app.post('/api/posts/upload', async (req, res) => {
             await profile.save();
         }
 
-        res.json({ message: 'Asset loaded onto live timeline successfully.', activePost: postEntry, userHallOfFame: profile.hallOfFame });
+        res.json({ message: 'Post uploaded successfully.', activePost: postEntry, userHallOfFame: profile.hallOfFame });
     } catch (err) {
-        res.status(500).json({ error: 'Data pipeline commit failure.' });
+        res.status(500).json({ error: 'Post upload failed.' });
     }
 });
 
@@ -409,7 +415,7 @@ app.post('/api/relations/follow', async (req, res) => {
         const actor = await User.findOne({ username: sender.toLowerCase() });
         const recipient = await User.findOne({ username: target.toLowerCase() });
 
-        if (!actor || !recipient) return res.status(404).json({ error: 'User nodes unverified.' });
+        if (!actor || !recipient) return res.status(404).json({ error: 'Profiles not found.' });
         if (actor.following.includes(recipient.username)) return res.status(400).json({ error: 'Connection already exists.' });
 
         if (recipient.isPrivate) {
@@ -423,7 +429,7 @@ app.post('/api/relations/follow', async (req, res) => {
                     fromUser: actor.username
                 }).save();
             }
-            return res.json({ status: 'requested', message: 'Follow transaction stored in verification queue.' });
+            return res.json({ status: 'requested', message: 'Follow request submitted successfully.' });
         } else {
             recipient.followers.push(actor.username);
             actor.following.push(recipient.username);
@@ -436,17 +442,17 @@ app.post('/api/relations/follow', async (req, res) => {
                 fromUser: actor.username
             }).save();
 
-            return res.json({ status: 'following', message: 'Connection established standardly.' });
+            return res.json({ status: 'following', message: 'Follow successfully established.' });
         }
     } catch (err) {
-        res.status(500).json({ error: 'Relationship processing system error.' });
+        res.status(500).json({ error: 'Follow system processing failure.' });
     }
 });
 
 app.get('/api/feed/:username', async (req, res) => {
     try {
         const user = await User.findOne({ username: req.params.username.toLowerCase() });
-        if (!user) return res.status(404).json({ error: 'User workspace unverified.' });
+        if (!user) return res.status(404).json({ error: 'Workspace user not found.' });
 
         const posts = await ActivePost.find({});
         const filteredPosts = [];
@@ -461,7 +467,7 @@ app.get('/api/feed/:username', async (req, res) => {
         }
         res.json(filteredPosts);
     } catch (err) {
-        res.status(500).json({ error: 'Feed interpolation loop processing error.' });
+        res.status(500).json({ error: 'Failed to compile stream items.' });
     }
 });
 
@@ -471,13 +477,13 @@ app.post('/api/messages/send', async (req, res) => {
         const actor = await User.findOne({ username: sender.toLowerCase() });
         const target = await User.findOne({ username: receiver.toLowerCase() });
 
-        if (!actor || !target) return res.status(404).json({ error: 'Communication endpoint unverified.' });
+        if (!actor || !target) return res.status(404).json({ error: 'Profiles not found.' });
 
         if (target.allowMessagesFrom === 'none') {
-            return res.status(403).json({ error: 'Permission Denied: Recipient restricts communication channels.' });
+            return res.status(403).json({ error: 'Permission Denied: Recipient restricts messaging channels.' });
         }
         if (target.allowMessagesFrom === 'following' && !target.following.includes(actor.username)) {
-            return res.status(403).json({ error: 'Permission Denied: Recipient requires a mutual connection.' });
+            return res.status(403).json({ error: 'Permission Denied: Recipient requires a mutual follow link.' });
         }
 
         let preApproved = (!target.isPrivate || target.following.includes(actor.username));
@@ -499,9 +505,9 @@ app.post('/api/messages/send', async (req, res) => {
             }).save();
         }
 
-        res.json({ message: 'Communication transaction saved to server.', data: msg });
+        res.json({ message: 'Message delivered to server successfully.', data: msg });
     } catch (err) {
-        res.status(500).json({ error: 'Failed to process message allocation.' });
+        res.status(500).json({ error: 'Failed to send message content.' });
     }
 });
 
@@ -519,7 +525,7 @@ app.get('/api/messages/thread/:userA/:userB', async (req, res) => {
 
         res.json(messages);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to compile thread records.' });
+        res.status(500).json({ error: 'Failed to compile messages thread.' });
     }
 });
 
@@ -557,9 +563,9 @@ app.post('/api/cron/purge', async (req, res) => {
         await ActivePost.deleteMany({});
         res.json({ message: 'Server expiration cycle processed.' });
     } catch (err) {
-        res.status(500).json({ error: 'Automated daemon cycle failed.' });
+        res.status(500).json({ error: 'Automated removal process failed.' });
     }
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server node active on port allocation: ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port: ${PORT}`));
