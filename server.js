@@ -25,15 +25,16 @@ const UserSchema = new mongoose.Schema({
     status: { type: String, default: 'Single' },
     country: { type: String, default: 'United Kingdom' },
     avatarString: { type: String, default: null },
-    hallOfFame: { type: Array, default: [] }, // Preserved top performing historical assets
+    hallOfFame: { type: Array, default: [] },
     followers: { type: [String], default: [] },
     following: { type: [String], default: [] },
     followRequests: { type: [String], default: [] },
     isPrivate: { type: Boolean, default: false },
     hideFollowersList: { type: Boolean, default: false },
     allowMessagesFrom: { type: String, enum: ['everyone', 'following', 'none'], default: 'everyone' },
-    lastMedalUsedAt: { type: Date, default: null },   // Tracks 24-hour reset limits
-    lastBroccoliUsedAt: { type: Date, default: null } // Tracks 24-hour reset limits
+    lastMedalUsedAt: { type: Date, default: null },
+    lastBroccoliUsedAt: { type: Date, default: null },
+    isAdmin: { type: Boolean, default: false }
 });
 const User = mongoose.model('User', UserSchema);
 
@@ -65,7 +66,87 @@ const DirectMessageSchema = new mongoose.Schema({
 });
 const DirectMessage = mongoose.model('DirectMessage', DirectMessageSchema);
 
-// --- INTERACTIVE REACTION ROUTE WITH 24H RESETS ---
+const NotificationSchema = new mongoose.Schema({
+    username: { type: String, required: true, lowercase: true },
+    type: { type: String, enum: ['like', 'medal', 'broccoli', 'follow', 'follow_request', 'message_request'], required: true },
+    fromUser: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+});
+const Notification = mongoose.model('Notification', NotificationSchema);
+
+// --- ADMINISTRATIVE SECURITY ROUTING ENDPOINTS ---
+
+app.delete('/api/admin/posts/:postId', async (req, res) => {
+    try {
+        const { adminUsername } = req.body;
+        const adminAccount = await User.findOne({ username: adminUsername.toLowerCase() });
+        if (!adminAccount || !adminAccount.isAdmin) {
+            return res.status(403).json({ error: 'Security Exception: Denied administrative authority access.' });
+        }
+        await ActivePost.findByIdAndDelete(req.params.postId);
+        res.json({ message: 'Content asset removed successfully by administrative moderation action.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Administrative post deletion channel failed.' });
+    }
+});
+
+app.delete('/api/admin/users/:targetUsername', async (req, res) => {
+    try {
+        const { adminUsername } = req.body;
+        const adminAccount = await User.findOne({ username: adminUsername.toLowerCase() });
+        if (!adminAccount || !adminAccount.isAdmin) {
+            return res.status(403).json({ error: 'Security Exception: Denied administrative authority access.' });
+        }
+        const offender = req.params.targetUsername.toLowerCase();
+        await User.findOneAndDelete({ username: offender });
+        await ActivePost.deleteMany({ username: offender });
+        res.json({ message: 'Offensive account handle profile and associated assets purged cleanly.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Administrative account purge channel failed.' });
+    }
+});
+
+// --- NOTIFICATIONS ROUTE ---
+app.get('/api/notifications/:username', async (req, res) => {
+    try {
+        const targetUser = req.params.username.toLowerCase();
+        const list = await Notification.find({ username: targetUser }).sort({ createdAt: -1 });
+        res.json(list);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch tracking metrics.' });
+    }
+});
+
+// --- PROFILE LOOKUP ROUTE ---
+app.get('/api/profile/:username', async (req, res) => {
+    try {
+        const account = await User.findOne({ username: req.params.username.toLowerCase() });
+        if (!account) return res.status(404).json({ error: 'Profile not found.' });
+        
+        const activePost = await ActivePost.findOne({ username: account.username });
+        
+        res.json({
+            username: account.username,
+            fullName: account.fullName,
+            bio: account.bio,
+            age: account.age,
+            status: account.status,
+            country: account.country,
+            avatarString: account.avatarString,
+            hallOfFame: account.hallOfFame,
+            followers: account.followers,
+            following: account.following,
+            followRequests: account.followRequests,
+            isPrivate: account.isPrivate,
+            allowMessagesFrom: account.allowMessagesFrom,
+            activePost: activePost
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to retrieve profile records.' });
+    }
+});
+
+// --- REACTION METRICS ROUTE ---
 app.post('/api/posts/react', async (req, res) => {
     try {
         const { postId, username, reactionType } = req.body;
@@ -77,54 +158,60 @@ app.post('/api/posts/react', async (req, res) => {
         if (!profile) return res.status(404).json({ error: 'User node unverified.' });
 
         const timestampNow = new Date();
+        let createdNewReaction = false;
 
         if (reactionType === 'like') {
-            // Likes remain unlimited across different posts, toggled strictly per post instance
             if (targetPost.likedBy.includes(userToken)) {
                 targetPost.likedBy = targetPost.likedBy.filter(u => u !== userToken);
             } else {
                 targetPost.likedBy.push(userToken);
+                createdNewReaction = true;
             }
             targetPost.likes = targetPost.likedBy.length;
         } 
         else if (reactionType === 'medal') {
-            // Enforce restriction of 1 usage per 24 hours
             const timePassed = profile.lastMedalUsedAt ? (timestampNow - new Date(profile.lastMedalUsedAt)) : Infinity;
             const hoursRemaining = 24 - (timePassed / (1000 * 60 * 60));
-
             if (hoursRemaining > 0 && !targetPost.medaledBy.includes(userToken)) {
                 return res.status(403).json({ error: 'Medal resource locked inside reload cycle constraint.' });
             }
-
             if (targetPost.medaledBy.includes(userToken)) {
                 targetPost.medaledBy = targetPost.medaledBy.filter(u => u !== userToken);
             } else {
                 targetPost.medaledBy.push(userToken);
                 profile.lastMedalUsedAt = timestampNow;
+                createdNewReaction = true;
             }
             targetPost.medals = targetPost.medaledBy.length;
             await profile.save();
         } 
         else if (reactionType === 'broccoli') {
-            // Enforce restriction of 1 usage per 24 hours
             const timePassed = profile.lastBroccoliUsedAt ? (timestampNow - new Date(profile.lastBroccoliUsedAt)) : Infinity;
             const hoursRemaining = 24 - (timePassed / (1000 * 60 * 60));
-
             if (hoursRemaining > 0 && !targetPost.broccoliedBy.includes(userToken)) {
                 return res.status(403).json({ error: 'Broccoli resource locked inside reload cycle constraint.' });
             }
-
             if (targetPost.broccoliedBy.includes(userToken)) {
                 targetPost.broccoliedBy = targetPost.broccoliedBy.filter(u => u !== userToken);
             } else {
                 targetPost.broccoliedBy.push(userToken);
                 profile.lastBroccoliUsedAt = timestampNow;
+                createdNewReaction = true;
             }
             targetPost.broccolis = targetPost.broccoliedBy.length;
             await profile.save();
         }
 
         await targetPost.save();
+
+        if (createdNewReaction && userToken !== targetPost.username.toLowerCase()) {
+            await new Notification({
+                username: targetPost.username,
+                type: reactionType,
+                fromUser: userToken
+            }).save();
+        }
+
         res.json({ 
             likes: targetPost.likes, 
             medals: targetPost.medals, 
@@ -140,12 +227,11 @@ app.post('/api/posts/react', async (req, res) => {
     }
 });
 
-// --- WEIGHTED SEARCH ALGORITHM ENDPOINT ---
+// --- INDEX MULTI-TIER SEARCH ENDPOINT ---
 app.get('/api/search', async (req, res) => {
     try {
         const rawQuery = req.query.q ? req.query.q.trim().toLowerCase() : '';
         if (!rawQuery) return res.json({ users: [], posts: [] });
-
         const cleanedQuery = rawQuery.replace('#', '');
 
         const globalUsersList = await User.find({});
@@ -184,7 +270,7 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-// --- PLATFORM SECURITY ACCESS AND AUTHENTICATION INSTANTIATION PANELS ---
+// --- CORE DISPATCH ROUTES ---
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
@@ -243,6 +329,7 @@ app.post('/api/auth/login', async (req, res) => {
             allowMessagesFrom: accountMatch.allowMessagesFrom,
             lastMedalUsedAt: accountMatch.lastMedalUsedAt,
             lastBroccoliUsedAt: accountMatch.lastBroccoliUsedAt,
+            isAdmin: accountMatch.isAdmin, 
             activePost: activeUpload
         });
     } catch (err) {
@@ -291,7 +378,6 @@ app.post('/api/posts/upload', async (req, res) => {
 
         await postEntry.save();
 
-        // AUTOMATIC ALLOCATION INTO DISCOVERY GRID FOR NEW ACCOUNTS (First 3 posts guarantee layout slots)
         if (profile.hallOfFame.length < 3) {
             const previewBlock = {
                 _id: postEntry._id,
@@ -330,6 +416,12 @@ app.post('/api/relations/follow', async (req, res) => {
             if (!recipient.followRequests.includes(actor.username)) {
                 recipient.followRequests.push(actor.username);
                 await recipient.save();
+                
+                await new Notification({
+                    username: recipient.username,
+                    type: 'follow_request',
+                    fromUser: actor.username
+                }).save();
             }
             return res.json({ status: 'requested', message: 'Follow transaction stored in verification queue.' });
         } else {
@@ -337,6 +429,13 @@ app.post('/api/relations/follow', async (req, res) => {
             actor.following.push(recipient.username);
             await recipient.save();
             await actor.save();
+
+            await new Notification({
+                username: recipient.username,
+                type: 'follow',
+                fromUser: actor.username
+            }).save();
+
             return res.json({ status: 'following', message: 'Connection established standardly.' });
         }
     } catch (err) {
@@ -391,6 +490,15 @@ app.post('/api/messages/send', async (req, res) => {
         });
 
         await msg.save();
+
+        if (!preApproved) {
+            await new Notification({
+                username: target.username,
+                type: 'message_request',
+                fromUser: actor.username
+            }).save();
+        }
+
         res.json({ message: 'Communication transaction saved to server.', data: msg });
     } catch (err) {
         res.status(500).json({ error: 'Failed to process message allocation.' });
@@ -436,11 +544,9 @@ app.post('/api/cron/purge', async (req, res) => {
                     createdAt: post.createdAt
                 };
 
-                // Filter out duplicates if it already landed inside the showcase initially
                 profile.hallOfFame = profile.hallOfFame.filter(item => String(item._id) !== String(post._id));
                 profile.hallOfFame.push(archiveBlock);
                 
-                // Keep the top 3 highest performing posts preserved standardly
                 profile.hallOfFame.sort((alpha, beta) => beta.likes - alpha.likes);
                 if (profile.hallOfFame.length > 3) {
                     profile.hallOfFame = profile.hallOfFame.slice(0, 3);
