@@ -29,11 +29,17 @@ const UserSchema = new mongoose.Schema({
     followers: { type: [String], default: [] },
     following: { type: [String], default: [] },
     followRequests: { type: [String], default: [] },
+    blockedUsers: { type: [String], default: [] }, // Blocked profiles tracking array
     isPrivate: { type: Boolean, default: false },
+    pgFriendly: { type: Boolean, default: false }, // Content filter preference flag
+    darkMode: { type: Boolean, default: false },   // Style mode tracking preference
     hideFollowersList: { type: Boolean, default: false },
     allowMessagesFrom: { type: String, enum: ['everyone', 'following', 'none'], default: 'everyone' },
     lastMedalUsedAt: { type: Date, default: null },
     lastBroccoliUsedAt: { type: Date, default: null },
+    weeklyScore: { type: Number, default: 0 },
+    currentWeeklyRank: { type: String, default: 'Unranked' },
+    highestWeeklyRank: { type: String, default: 'Unranked' },
     isAdmin: { type: Boolean, default: false }
 });
 const User = mongoose.model('User', UserSchema);
@@ -74,6 +80,60 @@ const NotificationSchema = new mongoose.Schema({
 });
 const Notification = mongoose.model('Notification', NotificationSchema);
 
+// --- RANKING SYSTEM ALGORITHM WORKBENCH ---
+
+async function computeGlobalWeeklyRankings() {
+    try {
+        const posts = await ActivePost.find({});
+        const userScores = {};
+
+        const allUsers = await User.find({});
+        allUsers.forEach(u => { userScores[u.username] = 0; });
+
+        posts.forEach(post => {
+            const author = post.username.toLowerCase();
+            if (userScores[author] !== undefined) {
+                const scoreCalculation = (post.likes * 1) + (post.medals * 25) - (post.broccolis * 10);
+                userScores[author] += scoreCalculation;
+            }
+        });
+
+        for (const username in userScores) {
+            await User.findOneAndUpdate({ username }, { weeklyScore: userScores[username] });
+        }
+
+        const sortedRankings = await User.find({}).sort({ weeklyScore: -1 });
+        
+        for (let index = 0; index < sortedRankings.length; index++) {
+            const userRecord = sortedRankings[index];
+            const currentPosition = index + 1;
+            let currentRankString = `${currentPosition}`;
+            if (currentPosition === 1) currentRankString += 'st';
+            else if (currentPosition === 2) currentRankString += 'nd';
+            else if (currentPosition === 3) currentRankString += 'rd';
+            else currentRankString += 'th';
+
+            let absoluteHighest = userRecord.highestWeeklyRank;
+            if (absoluteHighest === 'Unranked') {
+                absoluteHighest = currentRankString;
+            } else {
+                const pureHighestInteger = parseInt(absoluteHighest);
+                if (currentPosition < pureHighestInteger) {
+                    absoluteHighest = currentRankString;
+                }
+            }
+
+            await User.findByIdAndUpdate(userRecord._id, {
+                currentWeeklyRank: currentRankString,
+                highestWeeklyRank: absoluteHighest
+            });
+        }
+        console.log('Global rank metrics successfully processed.');
+    } catch (err) {
+        console.error('Error generating ranking calculations:', err);
+    }
+}
+
 // --- ADMINISTRATIVE SECURITY ROUTING ENDPOINTS ---
 
 app.delete('/api/admin/posts/:postId', async (req, res) => {
@@ -100,9 +160,81 @@ app.delete('/api/admin/users/:targetUsername', async (req, res) => {
         const offender = req.params.targetUsername.toLowerCase();
         await User.findOneAndDelete({ username: offender });
         await ActivePost.deleteMany({ username: offender });
-        res.json({ message: 'User profile and associated posts removed cleanly.' });
+        res.json({ message: 'User profile and associated posts removed cleanly from database storage clusters.' });
     } catch (err) {
         res.status(500).json({ error: 'Administrative account deletion channel failed.' });
+    }
+});
+
+// --- USER AUTONOMOUS DELETION ENDPOINT ---
+app.post('/api/profile/delete-account', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        const targetHandle = username.toLowerCase();
+
+        const userAccount = await User.findOne({ username: targetHandle });
+        if (!userAccount) return res.status(404).json({ error: 'Identity parameters unresolved.' });
+
+        const isMatch = await bcrypt.compare(password, userAccount.passwordHash);
+        if (!isMatch) return res.status(400).json({ error: 'Authentication verified poor evidence matching account password.' });
+
+        await User.findOneAndDelete({ username: targetHandle });
+        await ActivePost.deleteMany({ username: targetHandle });
+        await DirectMessage.deleteMany({ $or: [{ sender: targetHandle }, { receiver: targetHandle }] });
+        await Notification.deleteMany({ username: targetHandle });
+
+        res.json({ message: 'Account history components fully wiped from network parameters.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Autonomous removal process failed.' });
+    }
+});
+
+// --- RELATION RELATIONSHIP BLOCK ROUTING ENDPOINTS ---
+app.post('/api/relations/block', async (req, res) => {
+    try {
+        const { username, targetUsername } = req.body;
+        const actor = await User.findOne({ username: username.toLowerCase() });
+        const target = targetUsername.toLowerCase();
+
+        if (!actor) return res.status(404).json({ error: 'User profile node not verified.' });
+        
+        if (!actor.blockedUsers.includes(target)) {
+            actor.blockedUsers.push(target);
+            await actor.save();
+        }
+        res.json({ message: 'Target profile parameters restricted from dashboard stream feeds.', blockedUsers: actor.blockedUsers });
+    } catch (err) {
+        res.status(500).json({ error: 'Block execution system failure.' });
+    }
+});
+
+app.post('/api/relations/unblock', async (req, res) => {
+    try {
+        const { username, targetUsername } = req.body;
+        const actor = await User.findOne({ username: username.toLowerCase() });
+        const target = targetUsername.toLowerCase();
+
+        if (!actor) return res.status(404).json({ error: 'User profile node not verified.' });
+
+        actor.blockedUsers = actor.blockedUsers.filter(u => u !== target);
+        await actor.save();
+        res.json({ message: 'Target interaction rules normalized.', blockedUsers: actor.blockedUsers });
+    } catch (err) {
+        res.status(500).json({ error: 'Unblock execution system failure.' });
+    }
+});
+
+// --- GET TOP 25 LEADERBOARD ---
+app.get('/api/ranking/leaderboard', async (req, res) => {
+    try {
+        await computeGlobalWeeklyRankings();
+        const topAccounts = await User.find({})
+            .sort({ weeklyScore: -1 })
+            .limit(25)
+            .select('username fullName avatarString weeklyScore currentWeeklyRank');
+        res.json(topAccounts);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to extract top score rankings.' });
     }
 });
 
@@ -113,13 +245,14 @@ app.get('/api/notifications/:username', async (req, res) => {
         const list = await Notification.find({ username: targetUser }).sort({ createdAt: -1 });
         res.json(list);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch user updates.' });
+        res.status(500).json({ error: 'Failed to fetch user notifications.' });
     }
 });
 
 // --- PROFILE LOOKUP ROUTE ---
 app.get('/api/profile/:username', async (req, res) => {
     try {
+        await computeGlobalWeeklyRankings();
         const account = await User.findOne({ username: req.params.username.toLowerCase() });
         if (!account) return res.status(404).json({ error: 'Profile not found.' });
         
@@ -137,7 +270,13 @@ app.get('/api/profile/:username', async (req, res) => {
             followers: account.followers,
             following: account.following,
             followRequests: account.followRequests,
+            blockedUsers: account.blockedUsers,
             isPrivate: account.isPrivate,
+            pgFriendly: account.pgFriendly,
+            darkMode: account.darkMode,
+            weeklyScore: account.weeklyScore,
+            currentWeeklyRank: account.currentWeeklyRank,
+            highestWeeklyRank: account.highestWeeklyRank,
             allowMessagesFrom: account.allowMessagesFrom,
             activePost: activePost
         });
@@ -155,7 +294,6 @@ app.post('/api/posts/react', async (req, res) => {
 
         const userToken = username.trim().toLowerCase();
         
-        // SELF-REACTION PROTECTION LAYER
         if (targetPost.username.toLowerCase() === userToken) {
             return res.status(403).json({ error: 'Interaction restricted: You cannot react to your own upload.' });
         }
@@ -272,7 +410,7 @@ app.get('/api/search', async (req, res) => {
 
         res.json({ users: categorizedUsers, posts: categorizedPosts });
     } catch (err) {
-        res.status(500).json({ error: 'Search system error.' });
+        res.status(500).json({ error: 'Search system processing failure.' });
     }
 });
 
@@ -317,6 +455,7 @@ app.post('/api/auth/login', async (req, res) => {
         if (!checkPass) return res.status(400).json({ error: 'Incorrect password.' });
 
         const activeUpload = await ActivePost.findOne({ username: accountMatch.username });
+        await computeGlobalWeeklyRankings();
 
         res.json({
             username: accountMatch.username,
@@ -330,9 +469,15 @@ app.post('/api/auth/login', async (req, res) => {
             followers: accountMatch.followers,
             following: accountMatch.following,
             followRequests: accountMatch.followRequests,
+            blockedUsers: accountMatch.blockedUsers,
             isPrivate: accountMatch.isPrivate,
             hideFollowersList: accountMatch.hideFollowersList,
             allowMessagesFrom: accountMatch.allowMessagesFrom,
+            pgFriendly: accountMatch.pgFriendly,
+            darkMode: accountMatch.darkMode,
+            weeklyScore: accountMatch.weeklyScore,
+            currentWeeklyRank: accountMatch.currentWeeklyRank,
+            highestWeeklyRank: accountMatch.highestWeeklyRank,
             lastMedalUsedAt: accountMatch.lastMedalUsedAt,
             lastBroccoliUsedAt: accountMatch.lastBroccoliUsedAt,
             isAdmin: accountMatch.isAdmin, 
@@ -345,11 +490,11 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.put('/api/profile/update', async (req, res) => {
     try {
-        const { username, fullName, bio, age, status, country, avatarString, isPrivate, hideFollowersList, allowMessagesFrom } = req.body;
+        const { username, fullName, bio, age, status, country, avatarString, isPrivate, hideFollowersList, allowMessagesFrom, pgFriendly, darkMode } = req.body;
         
         const profile = await User.findOneAndUpdate(
             { username: username.toLowerCase() },
-            { fullName, bio, age, status, country, avatarString, isPrivate, hideFollowersList, allowMessagesFrom },
+            { fullName, bio, age, status, country, avatarString, isPrivate, hideFollowersList, allowMessagesFrom, pgFriendly, darkMode },
             { new: true }
         );
         
@@ -457,7 +602,22 @@ app.get('/api/feed/:username', async (req, res) => {
         const posts = await ActivePost.find({});
         const filteredPosts = [];
 
+        // INAPPROPRIATE TERMS FILTER PATTERNS
+        const bannedContentPhrases = ['explicit', 'offensiveword', 'badtheme', 'inappropriatecontent', 'swarword'];
+
         for (let post of posts) {
+            const authorHandle = post.username.toLowerCase();
+            
+            // BLOCK EXCLUSION CHECK
+            if (user.blockedUsers.includes(authorHandle)) continue;
+
+            // CONTENT QUALITY GATE REVIEWS
+            if (user.pgFriendly) {
+                const combinedTextCheck = (post.caption + ' ' + post.hashtags.join(' ')).toLowerCase();
+                const holdsInappropriateFlags = bannedContentPhrases.some(phrase => combinedTextCheck.includes(phrase));
+                if (holdsInappropriateFlags) continue;
+            }
+
             const author = await User.findOne({ username: post.username });
             if (!author) continue;
 
@@ -478,6 +638,7 @@ app.post('/api/messages/send', async (req, res) => {
         const target = await User.findOne({ username: receiver.toLowerCase() });
 
         if (!actor || !target) return res.status(404).json({ error: 'Profiles not found.' });
+        if (target.blockedUsers.includes(actor.username)) return res.status(403).json({ error: 'Communication blocked by recipient.' });
 
         if (target.allowMessagesFrom === 'none') {
             return res.status(403).json({ error: 'Permission Denied: Recipient restricts messaging channels.' });
@@ -561,7 +722,8 @@ app.post('/api/cron/purge', async (req, res) => {
             }
         }
         await ActivePost.deleteMany({});
-        res.json({ message: 'Server expiration cycle processed.' });
+        await computeGlobalWeeklyRankings();
+        res.json({ message: 'Server expiration and ranking cycles processed.' });
     } catch (err) {
         res.status(500).json({ error: 'Automated removal process failed.' });
     }
