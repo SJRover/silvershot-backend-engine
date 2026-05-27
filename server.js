@@ -7,7 +7,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(cors());
 
-const MONGO_URI = "mongodb+srv://silvershot_dev:aKa4ohr$@silvershotcluster.wexyaxl.mongodb.net/silvershot_db?retryWrites=true&w=majority";
+const MONGO_URI = "mongodb+srv://silvershot_dev:SilverShotNet2026@silvershotcluster.wexyaxl.mongodb.net/silvershot_db?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
   .then(() => console.log('Database verification loop established.'))
