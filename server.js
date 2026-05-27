@@ -4,10 +4,9 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '15mb' }));
 app.use(cors());
 
-// PASTE THE UPDATED ALPHANUMERIC PASSWORD DIRECTLY INSIDE THE STRING CONTAINER BELOW:
 const MONGO_URI = "mongodb+srv://silvershot_dev:SilverShotNet2026@silvershotcluster.wexyaxl.mongodb.net/silvershot_db?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
@@ -26,13 +25,15 @@ const UserSchema = new mongoose.Schema({
     status: { type: String, default: 'Single' },
     country: { type: String, default: 'United Kingdom' },
     avatarString: { type: String, default: null },
-    hallOfFame: { type: Array, default: [] },
+    hallOfFame: { type: Array, default: [] }, // Preserved top performing historical assets
     followers: { type: [String], default: [] },
     following: { type: [String], default: [] },
     followRequests: { type: [String], default: [] },
     isPrivate: { type: Boolean, default: false },
     hideFollowersList: { type: Boolean, default: false },
-    allowMessagesFrom: { type: String, enum: ['everyone', 'following', 'none'], default: 'everyone' }
+    allowMessagesFrom: { type: String, enum: ['everyone', 'following', 'none'], default: 'everyone' },
+    lastMedalUsedAt: { type: Date, default: null },   // Tracks 24-hour reset limits
+    lastBroccoliUsedAt: { type: Date, default: null } // Tracks 24-hour reset limits
 });
 const User = mongoose.model('User', UserSchema);
 
@@ -44,12 +45,14 @@ const ActivePostSchema = new mongoose.Schema({
     img: { type: String, required: true },
     category: { type: String, required: true },
     caption: { type: String, required: true },
-    hashtags: { type: [String], default: [] }, // Indexed data array for search algorithm performance
+    hashtags: { type: [String], default: [] },
     likes: { type: Number, default: 0 },
     medals: { type: Number, default: 0 },
     broccolis: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now },
-    userInteractors: { type: [String], default: [] }
+    likedBy: { type: [String], default: [] },
+    medaledBy: { type: [String], default: [] },
+    broccoliedBy: { type: [String], default: [] },
+    createdAt: { type: Date, default: Date.now }
 });
 const ActivePost = mongoose.model('ActivePost', ActivePostSchema);
 
@@ -62,33 +65,95 @@ const DirectMessageSchema = new mongoose.Schema({
 });
 const DirectMessage = mongoose.model('DirectMessage', DirectMessageSchema);
 
-// --- WEIGHTED SEARCH ALGORITHM ENDPOINT ---
+// --- INTERACTIVE REACTION ROUTE WITH 24H RESETS ---
+app.post('/api/posts/react', async (req, res) => {
+    try {
+        const { postId, username, reactionType } = req.body;
+        const targetPost = await ActivePost.findById(postId);
+        if (!targetPost) return res.status(404).json({ error: 'Target timeline asset unresolved.' });
 
+        const userToken = username.trim().toLowerCase();
+        const profile = await User.findOne({ username: userToken });
+        if (!profile) return res.status(404).json({ error: 'User node unverified.' });
+
+        const timestampNow = new Date();
+
+        if (reactionType === 'like') {
+            // Likes remain unlimited across different posts, toggled strictly per post instance
+            if (targetPost.likedBy.includes(userToken)) {
+                targetPost.likedBy = targetPost.likedBy.filter(u => u !== userToken);
+            } else {
+                targetPost.likedBy.push(userToken);
+            }
+            targetPost.likes = targetPost.likedBy.length;
+        } 
+        else if (reactionType === 'medal') {
+            // Enforce restriction of 1 usage per 24 hours
+            const timePassed = profile.lastMedalUsedAt ? (timestampNow - new Date(profile.lastMedalUsedAt)) : Infinity;
+            const hoursRemaining = 24 - (timePassed / (1000 * 60 * 60));
+
+            if (hoursRemaining > 0 && !targetPost.medaledBy.includes(userToken)) {
+                return res.status(403).json({ error: 'Medal resource locked inside reload cycle constraint.' });
+            }
+
+            if (targetPost.medaledBy.includes(userToken)) {
+                targetPost.medaledBy = targetPost.medaledBy.filter(u => u !== userToken);
+            } else {
+                targetPost.medaledBy.push(userToken);
+                profile.lastMedalUsedAt = timestampNow;
+            }
+            targetPost.medals = targetPost.medaledBy.length;
+            await profile.save();
+        } 
+        else if (reactionType === 'broccoli') {
+            // Enforce restriction of 1 usage per 24 hours
+            const timePassed = profile.lastBroccoliUsedAt ? (timestampNow - new Date(profile.lastBroccoliUsedAt)) : Infinity;
+            const hoursRemaining = 24 - (timePassed / (1000 * 60 * 60));
+
+            if (hoursRemaining > 0 && !targetPost.broccoliedBy.includes(userToken)) {
+                return res.status(403).json({ error: 'Broccoli resource locked inside reload cycle constraint.' });
+            }
+
+            if (targetPost.broccoliedBy.includes(userToken)) {
+                targetPost.broccoliedBy = targetPost.broccoliedBy.filter(u => u !== userToken);
+            } else {
+                targetPost.broccoliedBy.push(userToken);
+                profile.lastBroccoliUsedAt = timestampNow;
+            }
+            targetPost.broccolis = targetPost.broccoliedBy.length;
+            await profile.save();
+        }
+
+        await targetPost.save();
+        res.json({ 
+            likes: targetPost.likes, 
+            medals: targetPost.medals, 
+            broccolis: targetPost.broccolis,
+            likedBy: targetPost.likedBy,
+            medaledBy: targetPost.medaledBy,
+            broccoliedBy: targetPost.broccoliedBy,
+            lastMedalUsedAt: profile.lastMedalUsedAt,
+            lastBroccoliUsedAt: profile.lastBroccoliUsedAt
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Metric pipeline modification failure.' });
+    }
+});
+
+// --- WEIGHTED SEARCH ALGORITHM ENDPOINT ---
 app.get('/api/search', async (req, res) => {
     try {
         const rawQuery = req.query.q ? req.query.q.trim().toLowerCase() : '';
-        if (!rawQuery) {
-            return res.json({ users: [], posts: [] });
-        }
+        if (!rawQuery) return res.json({ users: [], posts: [] });
 
-        // Clean target string to isolate standalone search terms or hashtags
         const cleanedQuery = rawQuery.replace('#', '');
 
-        // 1. Scan Profile Records and Calculate Relevance Metrics
         const globalUsersList = await User.find({});
         const categorizedUsers = globalUsersList.map(profile => {
             let relevanceRank = 0;
-            
-            if (profile.username === cleanedQuery) {
-                relevanceRank += 100; // Exact account handle matching priority
-            } else if (profile.username.includes(cleanedQuery)) {
-                relevanceRank += 50;  // Substring alignment priority
-            }
-            
-            if (profile.fullName.toLowerCase().includes(cleanedQuery)) {
-                relevanceRank += 30;  // Real name string intersection priority
-            }
-
+            if (profile.username === cleanedQuery) relevanceRank += 100;
+            else if (profile.username.includes(cleanedQuery)) relevanceRank += 50;
+            if (profile.fullName.toLowerCase().includes(cleanedQuery)) relevanceRank += 30;
             return { profile, relevanceRank };
         })
         .filter(node => node.relevanceRank > 0)
@@ -101,21 +166,12 @@ app.get('/api/search', async (req, res) => {
             isPrivate: node.profile.isPrivate
         }));
 
-        // 2. Scan Post Streams and Rank via Tag Weighting Mappings
         const globalPostsList = await ActivePost.find({});
         const categorizedPosts = globalPostsList.map(post => {
             let relevanceRank = 0;
-
-            if (post.hashtags && post.hashtags.includes(cleanedQuery)) {
-                relevanceRank += 80;  // Explicit hashtag index intersection bonus
-            }
-            if (post.caption.toLowerCase().includes(cleanedQuery)) {
-                relevanceRank += 40;  // Text block keyword correlation value
-            }
-            if (post.username === cleanedQuery) {
-                relevanceRank += 20;  // Author handle intersection value
-            }
-
+            if (post.hashtags && post.hashtags.includes(cleanedQuery)) relevanceRank += 80;
+            if (post.caption.toLowerCase().includes(cleanedQuery)) relevanceRank += 40;
+            if (post.username === cleanedQuery) relevanceRank += 20;
             return { post, relevanceRank };
         })
         .filter(node => node.relevanceRank > 0)
@@ -128,8 +184,7 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-// --- STANDARD USER ACCOUNT CONTROL AND TIMELINE ROUTES ---
-
+// --- PLATFORM SECURITY ACCESS AND AUTHENTICATION INSTANTIATION PANELS ---
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
@@ -186,6 +241,8 @@ app.post('/api/auth/login', async (req, res) => {
             isPrivate: accountMatch.isPrivate,
             hideFollowersList: accountMatch.hideFollowersList,
             allowMessagesFrom: accountMatch.allowMessagesFrom,
+            lastMedalUsedAt: accountMatch.lastMedalUsedAt,
+            lastBroccoliUsedAt: accountMatch.lastBroccoliUsedAt,
             activePost: activeUpload
         });
     } catch (err) {
@@ -229,11 +286,32 @@ app.post('/api/posts/upload', async (req, res) => {
             img,
             category,
             caption,
-            hashtags: hashtags || [] // Save clean array metadata strings standardly
+            hashtags: hashtags || []
         });
 
         await postEntry.save();
-        res.json({ message: 'Asset loaded onto live timeline successfully.', activePost: postEntry });
+
+        // AUTOMATIC ALLOCATION INTO DISCOVERY GRID FOR NEW ACCOUNTS (First 3 posts guarantee layout slots)
+        if (profile.hallOfFame.length < 3) {
+            const previewBlock = {
+                _id: postEntry._id,
+                img: postEntry.img,
+                caption: postEntry.caption,
+                likes: postEntry.likes,
+                medals: postEntry.medals,
+                broccolis: postEntry.broccolis,
+                initial: postEntry.initial,
+                fullName: postEntry.fullName,
+                username: postEntry.username,
+                avatarImg: postEntry.avatarImg,
+                hashtags: postEntry.hashtags,
+                createdAt: postEntry.createdAt
+            };
+            profile.hallOfFame.push(previewBlock);
+            await profile.save();
+        }
+
+        res.json({ message: 'Asset loaded onto live timeline successfully.', activePost: postEntry, userHallOfFame: profile.hallOfFame });
     } catch (err) {
         res.status(500).json({ error: 'Data pipeline commit failure.' });
     }
@@ -344,6 +422,7 @@ app.post('/api/cron/purge', async (req, res) => {
             const profile = await User.findOne({ username: post.username });
             if (profile) {
                 const archiveBlock = {
+                    _id: post._id,
                     img: post.img,
                     caption: post.caption,
                     likes: post.likes,
@@ -352,9 +431,16 @@ app.post('/api/cron/purge', async (req, res) => {
                     initial: post.initial,
                     fullName: post.fullName,
                     username: post.username,
-                    avatarImg: post.avatarImg
+                    avatarImg: post.avatarImg,
+                    hashtags: post.hashtags,
+                    createdAt: post.createdAt
                 };
+
+                // Filter out duplicates if it already landed inside the showcase initially
+                profile.hallOfFame = profile.hallOfFame.filter(item => String(item._id) !== String(post._id));
                 profile.hallOfFame.push(archiveBlock);
+                
+                // Keep the top 3 highest performing posts preserved standardly
                 profile.hallOfFame.sort((alpha, beta) => beta.likes - alpha.likes);
                 if (profile.hallOfFame.length > 3) {
                     profile.hallOfFame = profile.hallOfFame.slice(0, 3);
