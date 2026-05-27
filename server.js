@@ -29,10 +29,10 @@ const UserSchema = new mongoose.Schema({
     followers: { type: [String], default: [] },
     following: { type: [String], default: [] },
     followRequests: { type: [String], default: [] },
-    blockedUsers: { type: [String], default: [] }, // Blocked profiles tracking array
+    blockedUsers: { type: [String], default: [] }, 
     isPrivate: { type: Boolean, default: false },
-    pgFriendly: { type: Boolean, default: false }, // Content filter preference flag
-    darkMode: { type: Boolean, default: false },   // Style mode tracking preference
+    pgFriendly: { type: Boolean, default: false }, 
+    darkMode: { type: Boolean, default: false },   
     hideFollowersList: { type: Boolean, default: false },
     allowMessagesFrom: { type: String, enum: ['everyone', 'following', 'none'], default: 'everyone' },
     lastMedalUsedAt: { type: Date, default: null },
@@ -128,7 +128,6 @@ async function computeGlobalWeeklyRankings() {
                 highestWeeklyRank: absoluteHighest
             });
         }
-        console.log('Global rank metrics successfully processed.');
     } catch (err) {
         console.error('Error generating ranking calculations:', err);
     }
@@ -272,12 +271,12 @@ app.get('/api/profile/:username', async (req, res) => {
             followRequests: account.followRequests,
             blockedUsers: account.blockedUsers,
             isPrivate: account.isPrivate,
+            allowMessagesFrom: account.allowMessagesFrom,
             pgFriendly: account.pgFriendly,
             darkMode: account.darkMode,
             weeklyScore: account.weeklyScore,
             currentWeeklyRank: account.currentWeeklyRank,
             highestWeeklyRank: account.highestWeeklyRank,
-            allowMessagesFrom: account.allowMessagesFrom,
             activePost: activePost
         });
     } catch (err) {
@@ -602,16 +601,13 @@ app.get('/api/feed/:username', async (req, res) => {
         const posts = await ActivePost.find({});
         const filteredPosts = [];
 
-        // INAPPROPRIATE TERMS FILTER PATTERNS
         const bannedContentPhrases = ['explicit', 'offensiveword', 'badtheme', 'inappropriatecontent', 'swarword'];
 
         for (let post of posts) {
             const authorHandle = post.username.toLowerCase();
             
-            // BLOCK EXCLUSION CHECK
             if (user.blockedUsers.includes(authorHandle)) continue;
 
-            // CONTENT QUALITY GATE REVIEWS
             if (user.pgFriendly) {
                 const combinedTextCheck = (post.caption + ' ' + post.hashtags.join(' ')).toLowerCase();
                 const holdsInappropriateFlags = bannedContentPhrases.some(phrase => combinedTextCheck.includes(phrase));
