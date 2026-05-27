@@ -133,7 +133,7 @@ async function computeGlobalWeeklyRankings() {
     }
 }
 
-// --- ADMINISTRATIVE SECURITY ROUTING ENDPOINTS ---
+// --- ADMINISTRATIVE ROUTING ENDPOINTS ---
 
 app.delete('/api/admin/posts/:postId', async (req, res) => {
     try {
