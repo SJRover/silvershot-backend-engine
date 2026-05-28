@@ -80,7 +80,7 @@ const NotificationSchema = new mongoose.Schema({
 });
 const Notification = mongoose.model('Notification', NotificationSchema);
 
-// --- RANKING SYSTEM ALGORITHM WORKBENCH ---
+// --- RANKING SYSTEM ALGORITHM ---
 
 async function computeGlobalWeeklyRankings() {
     try {
@@ -448,10 +448,10 @@ app.post('/api/auth/login', async (req, res) => {
         const queryStr = loginInput.trim().toLowerCase();
 
         let accountMatch = await User.findOne({ username: queryStr }) || await User.findOne({ email: queryStr });
-        if (!accountMatch) return res.status(400).json({ error: 'Account credentials not found.' });
+        if (!accountMatch) return res.status(401).json({ error: 'Incorrect username or password, please try again.' });
 
         const checkPass = await bcrypt.compare(password, accountMatch.passwordHash);
-        if (!checkPass) return res.status(400).json({ error: 'Incorrect password.' });
+        if (!checkPass) return res.status(401).json({ error: 'Incorrect username or password, please try again.' });
 
         const activeUpload = await ActivePost.findOne({ username: accountMatch.username });
         await computeGlobalWeeklyRankings();
@@ -483,7 +483,7 @@ app.post('/api/auth/login', async (req, res) => {
             activePost: activeUpload
         });
     } catch (err) {
-        res.status(500).json({ error: 'Server authentication failed.' });
+        res.status(500).json({ error: 'Server authentication loop error.' });
     }
 });
 
