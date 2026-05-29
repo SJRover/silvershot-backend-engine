@@ -25,7 +25,7 @@ const UserSchema = new mongoose.Schema({
     status: { type: String, default: 'Single' },
     country: { type: String, default: 'United Kingdom' },
     avatarString: { type: String, default: null },
-    bannerString: { type: String, default: null }, // RECTANGULAR PROFILE HERO BACKGROUND Asset
+    bannerString: { type: String, default: null }, 
     hallOfFame: { type: Array, default: [] },
     followers: { type: [String], default: [] },
     following: { type: [String], default: [] },
@@ -81,7 +81,7 @@ const DirectMessageSchema = new mongoose.Schema({
     text: { type: String, required: true },
     createdAt: { type: Date, default: Date.now },
     isAccepted: { type: Boolean, default: false },
-    isRead: { type: Boolean, default: false } // READ RECEIPTS TRANSITION LOG INDICATOR
+    isRead: { type: Boolean, default: false } 
 });
 const DirectMessage = mongoose.model('DirectMessage', DirectMessageSchema);
 
@@ -90,7 +90,7 @@ const NotificationSchema = new mongoose.Schema({
     type: { type: String, enum: ['like', 'medal', 'broccoli', 'follow', 'follow_request', 'message_request'], required: true },
     fromUser: { type: String, required: true },
     createdAt: { type: Date, default: Date.now },
-    isRead: { type: Boolean, default: false } // INDIVIDUAL ALERT REMOVAL TRACKER booleans
+    isRead: { type: Boolean, default: false } 
 });
 const Notification = mongoose.model('Notification', NotificationSchema);
 
@@ -164,8 +164,6 @@ app.get('/api/messages/unread-summary/:username', async (req, res) => {
     try {
         const targetUser = req.params.username.toLowerCase();
         const unreadLogs = await DirectMessage.find({ receiver: targetUser, isRead: false });
-        
-        // Collate unread records to isolate individual unique sender nodes
         const uniqueSenders = [...new Set(unreadLogs.map(msg => msg.sender.toLowerCase()))];
         res.json({ unreadThreadsCount: uniqueSenders.length, senders: uniqueSenders });
     } catch (err) {
@@ -231,6 +229,7 @@ app.post('/api/comments/:commentId/react', async (req, res) => {
         if (!targetNode) return res.status(404).json({ error: 'Comment context not found.' });
 
         const rootPost = await ActivePost.findById(targetNode.postId);
+        // Fallback validation check: allow reading but lock reaction updates if the post is archived in user showcase slots
         if (!rootPost) {
             return res.status(403).json({ error: 'Reactions are restricted for archived records.' });
         }
@@ -377,7 +376,18 @@ app.get('/api/profile/:username', async (req, res) => {
         if (activePost) {
             const timelineDelta = Date.now() - new Date(activePost.createdAt).getTime();
             if (timelineDelta <= 24 * 60 * 60 * 1000) {
-                validActivePost = activePost;
+                validActivePost = activePost.toObject();
+                validActivePost.commentCount = await Comment.countDocuments({ postId: activePost._id });
+            }
+        }
+        
+        // Dynamically compute embedded comment counts across each Hall of Fame showcase slot item
+        const verifiedHallOfFame = [];
+        if (account.hallOfFame && account.hallOfFame.length > 0) {
+            for (let item of account.hallOfFame) {
+                const count = await Comment.countDocuments({ postId: item._id });
+                const itemObj = { ...item, commentCount: count };
+                verifiedHallOfFame.push(itemObj);
             }
         }
         
@@ -389,8 +399,8 @@ app.get('/api/profile/:username', async (req, res) => {
             status: account.status,
             country: account.country,
             avatarString: account.avatarString,
-            bannerString: account.bannerString, // Include background banner payload mapping
-            hallOfFame: account.hallOfFame,
+            bannerString: account.bannerString,
+            hallOfFame: verifiedHallOfFame,
             followers: account.followers,
             following: account.following,
             followRequests: account.followRequests,
@@ -519,21 +529,28 @@ app.get('/api/search', async (req, res) => {
         }));
 
         const globalPostsList = await ActivePost.find({});
-        const categorizedPosts = globalPostsList.map(post => {
+        const categorizedPosts = [];
+        
+        for (let post of globalPostsList) {
             let relevanceRank = 0;
             const boundaryDelta = Date.now() - new Date(post.createdAt).getTime();
-            if (boundaryDelta > 24 * 60 * 60 * 1000) return { post, relevanceRank: 0 };
+            if (boundaryDelta > 24 * 60 * 60 * 1000) continue;
 
             if (post.hashtags && post.hashtags.includes(cleanedQuery)) relevanceRank += 80;
             if (post.caption.toLowerCase().includes(cleanedQuery)) relevanceRank += 40;
             if (post.username === cleanedQuery) relevanceRank += 20;
-            return { post, relevanceRank };
-        })
-        .filter(node => node.relevanceRank > 0)
-        .sort((alpha, beta) => beta.relevanceRank - alpha.relevanceRank)
-        .map(node => node.post);
+            
+            if (relevanceRank > 0) {
+                const postObj = post.toObject();
+                postObj.commentCount = await Comment.countDocuments({ postId: post._id });
+                categorizedPosts.push({ postObj, relevanceRank });
+            }
+        }
+        
+        categorizedPosts.sort((alpha, beta) => beta.relevanceRank - alpha.relevanceRank);
+        const sortedPosts = categorizedPosts.map(node => node.postObj);
 
-        res.json({ users: categorizedUsers, posts: categorizedPosts });
+        res.json({ users: categorizedUsers, posts: sortedPosts });
     } catch (err) {
         res.status(500).json({ error: 'Search system processing failure.' });
     }
@@ -587,7 +604,8 @@ app.post('/api/auth/login', async (req, res) => {
         if (activeUpload) {
             const verificationLifespan = Date.now() - new Date(activeUpload.createdAt).getTime();
             if (verificationLifespan <= 24 * 60 * 60 * 1000) {
-                validActivePost = activeUpload;
+                validActivePost = activeUpload.toObject();
+                validActivePost.commentCount = await Comment.countDocuments({ postId: activeUpload._id });
             }
         }
 
@@ -757,7 +775,9 @@ app.get('/api/feed/:username', async (req, res) => {
             if (!author) continue;
 
             if (author.username === user.username || !author.isPrivate || author.followers.includes(user.username)) {
-                filteredPosts.push(post);
+                const postObj = post.toObject();
+                postObj.commentCount = await Comment.countDocuments({ postId: post._id });
+                filteredPosts.push(postObj);
             }
         }
         res.json(filteredPosts);
@@ -812,7 +832,6 @@ app.get('/api/messages/thread/:userA/:userB', async (req, res) => {
         const uA = req.params.userA.toLowerCase();
         const uB = req.params.userB.toLowerCase();
 
-        // Mark incoming message data nodes read upon chat feed retrieval compilation
         await DirectMessage.updateMany({ sender: uB, receiver: uA, isRead: false }, { isRead: true });
 
         const messages = await DirectMessage.find({
