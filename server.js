@@ -25,6 +25,7 @@ const UserSchema = new mongoose.Schema({
     status: { type: String, default: 'Single' },
     country: { type: String, default: 'United Kingdom' },
     avatarString: { type: String, default: null },
+    bannerString: { type: String, default: null }, // RECTANGULAR PROFILE HERO BACKGROUND Asset
     hallOfFame: { type: Array, default: [] },
     followers: { type: [String], default: [] },
     following: { type: [String], default: [] },
@@ -63,12 +64,24 @@ const ActivePostSchema = new mongoose.Schema({
 });
 const ActivePost = mongoose.model('ActivePost', ActivePostSchema);
 
+const CommentSchema = new mongoose.Schema({
+    postId: { type: String, required: true, index: true },
+    username: { type: String, required: true },
+    text: { type: String, required: true },
+    parentId: { type: String, default: null, index: true },
+    likes: { type: Number, default: 0 },
+    likedBy: { type: [String], default: [] },
+    createdAt: { type: Date, default: Date.now }
+});
+const Comment = mongoose.model('Comment', CommentSchema);
+
 const DirectMessageSchema = new mongoose.Schema({
     sender: { type: String, required: true },
     receiver: { type: String, required: true },
     text: { type: String, required: true },
     createdAt: { type: Date, default: Date.now },
-    isAccepted: { type: Boolean, default: false }
+    isAccepted: { type: Boolean, default: false },
+    isRead: { type: Boolean, default: false } // READ RECEIPTS TRANSITION LOG INDICATOR
 });
 const DirectMessage = mongoose.model('DirectMessage', DirectMessageSchema);
 
@@ -76,7 +89,8 @@ const NotificationSchema = new mongoose.Schema({
     username: { type: String, required: true, lowercase: true },
     type: { type: String, enum: ['like', 'medal', 'broccoli', 'follow', 'follow_request', 'message_request'], required: true },
     fromUser: { type: String, required: true },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+    isRead: { type: Boolean, default: false } // INDIVIDUAL ALERT REMOVAL TRACKER booleans
 });
 const Notification = mongoose.model('Notification', NotificationSchema);
 
@@ -133,6 +147,112 @@ async function computeGlobalWeeklyRankings() {
     }
 }
 
+// --- SYSTEM NOTIFICATIONS API TERMINALS ---
+
+app.post('/api/notifications/:id/read', async (req, res) => {
+    try {
+        await Notification.findByIdAndUpdate(req.params.id, { isRead: true });
+        res.json({ success: true, message: 'Alert index state modified successfully.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to alter alert index parameters.' });
+    }
+});
+
+// --- SYSTEM CHAT AND MESSAGING TERMINALS ---
+
+app.get('/api/messages/unread-summary/:username', async (req, res) => {
+    try {
+        const targetUser = req.params.username.toLowerCase();
+        const unreadLogs = await DirectMessage.find({ receiver: targetUser, isRead: false });
+        
+        // Collate unread records to isolate individual unique sender nodes
+        const uniqueSenders = [...new Set(unreadLogs.map(msg => msg.sender.toLowerCase()))];
+        res.json({ unreadThreadsCount: uniqueSenders.length, senders: uniqueSenders });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to extract chat channel summary.' });
+    }
+});
+
+app.get('/api/posts/:postId/comments', async (req, res) => {
+    try {
+        const { sort } = req.query;
+        let records = await Comment.find({ postId: req.params.postId });
+        
+        if (sort === 'likes') {
+            records.sort((alpha, beta) => beta.likes - alpha.likes);
+        } else if (sort === 'oldest') {
+            records.sort((alpha, beta) => new Date(alpha.createdAt) - new Date(beta.createdAt));
+        } else {
+            records.sort((alpha, beta) => new Date(beta.createdAt) - new Date(alpha.createdAt));
+        }
+        res.json(records);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to compile comment records.' });
+    }
+});
+
+app.post('/api/posts/:postId/comments', async (req, res) => {
+    try {
+        const { username, text, parentId } = req.body;
+        const targetPostId = req.params.postId;
+
+        const livePost = await ActivePost.findById(targetPostId);
+        if (!livePost) {
+            const architecturalQuery = await User.findOne({ "hallOfFame._id": targetPostId });
+            if (architecturalQuery) {
+                return res.status(403).json({ error: 'Interaction restricted: Archived showcase items are locked.' });
+            }
+            return res.status(404).json({ error: 'Target node context unresolved.' });
+        }
+
+        const lifespanDelta = Date.now() - new Date(livePost.createdAt).getTime();
+        if (lifespanDelta > 24 * 60 * 60 * 1000) {
+            return res.status(403).json({ error: 'Interaction restricted: The active submission cycle has closed.' });
+        }
+
+        const evaluationBlock = new Comment({
+            postId: targetPostId,
+            username: username.toLowerCase(),
+            text: text.trim(),
+            parentId: parentId || null
+        });
+        await evaluationBlock.save();
+        res.json(evaluationBlock);
+    } catch (err) {
+        res.status(500).json({ error: 'Comment transmission failed.' });
+    }
+});
+
+app.post('/api/comments/:commentId/react', async (req, res) => {
+    try {
+        const { username } = req.body;
+        const identityToken = username.toLowerCase();
+        const targetNode = await Comment.findById(req.params.commentId);
+        if (!targetNode) return res.status(404).json({ error: 'Comment context not found.' });
+
+        const rootPost = await ActivePost.findById(targetNode.postId);
+        if (!rootPost) {
+            return res.status(403).json({ error: 'Reactions are restricted for archived records.' });
+        }
+
+        const timeCheckDelta = Date.now() - new Date(rootPost.createdAt).getTime();
+        if (timeCheckDelta > 24 * 60 * 60 * 1000) {
+            return res.status(403).json({ error: 'Reactions are locked following historical evaluation.' });
+        }
+
+        if (targetNode.likedBy.includes(identityToken)) {
+            targetNode.likedBy = targetNode.likedBy.filter(handle => handle !== identityToken);
+        } else {
+            targetNode.likedBy.push(identityToken);
+        }
+        targetNode.likes = targetNode.likedBy.length;
+        await targetNode.save();
+        res.json(targetNode);
+    } catch (err) {
+        res.status(500).json({ error: 'Comment reaction compilation loop error.' });
+    }
+});
+
 // --- ADMINISTRATIVE ROUTING ENDPOINTS ---
 
 app.delete('/api/admin/posts/:postId', async (req, res) => {
@@ -143,6 +263,7 @@ app.delete('/api/admin/posts/:postId', async (req, res) => {
             return res.status(403).json({ error: 'Security Exception: Denied administrative authority access.' });
         }
         await ActivePost.findByIdAndDelete(req.params.postId);
+        await Comment.deleteMany({ postId: req.params.postId });
         res.json({ message: 'Post removed successfully by administrative moderation action.' });
     } catch (err) {
         res.status(500).json({ error: 'Administrative post deletion channel failed.' });
@@ -165,7 +286,6 @@ app.delete('/api/admin/users/:targetUsername', async (req, res) => {
     }
 });
 
-// --- USER AUTONOMOUS DELETION ENDPOINT ---
 app.post('/api/profile/delete-account', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -188,7 +308,6 @@ app.post('/api/profile/delete-account', async (req, res) => {
     }
 });
 
-// --- RELATION RELATIONSHIP BLOCK ROUTING ENDPOINTS ---
 app.post('/api/relations/block', async (req, res) => {
     try {
         const { username, targetUsername } = req.body;
@@ -223,7 +342,6 @@ app.post('/api/relations/unblock', async (req, res) => {
     }
 });
 
-// --- GET TOP 25 LEADERBOARD ---
 app.get('/api/ranking/leaderboard', async (req, res) => {
     try {
         await computeGlobalWeeklyRankings();
@@ -237,18 +355,16 @@ app.get('/api/ranking/leaderboard', async (req, res) => {
     }
 });
 
-// --- NOTIFICATIONS ROUTE ---
 app.get('/api/notifications/:username', async (req, res) => {
     try {
         const targetUser = req.params.username.toLowerCase();
-        const list = await Notification.find({ username: targetUser }).sort({ createdAt: -1 });
+        const list = await Notification.find({ username: targetUser, isRead: false }).sort({ createdAt: -1 });
         res.json(list);
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch user notifications.' });
     }
 });
 
-// --- PROFILE LOOKUP ROUTE ---
 app.get('/api/profile/:username', async (req, res) => {
     try {
         await computeGlobalWeeklyRankings();
@@ -256,6 +372,14 @@ app.get('/api/profile/:username', async (req, res) => {
         if (!account) return res.status(404).json({ error: 'Profile not found.' });
         
         const activePost = await ActivePost.findOne({ username: account.username });
+        
+        let validActivePost = null;
+        if (activePost) {
+            const timelineDelta = Date.now() - new Date(activePost.createdAt).getTime();
+            if (timelineDelta <= 24 * 60 * 60 * 1000) {
+                validActivePost = activePost;
+            }
+        }
         
         res.json({
             username: account.username,
@@ -265,6 +389,7 @@ app.get('/api/profile/:username', async (req, res) => {
             status: account.status,
             country: account.country,
             avatarString: account.avatarString,
+            bannerString: account.bannerString, // Include background banner payload mapping
             hallOfFame: account.hallOfFame,
             followers: account.followers,
             following: account.following,
@@ -277,14 +402,13 @@ app.get('/api/profile/:username', async (req, res) => {
             weeklyScore: account.weeklyScore,
             currentWeeklyRank: account.currentWeeklyRank,
             highestWeeklyRank: account.highestWeeklyRank,
-            activePost: activePost
+            activePost: validActivePost
         });
     } catch (err) {
         res.status(500).json({ error: 'Failed to retrieve profile records.' });
     }
 });
 
-// --- REACTION METRICS ROUTE ---
 app.post('/api/posts/react', async (req, res) => {
     try {
         const { postId, username, reactionType } = req.body;
@@ -370,7 +494,6 @@ app.post('/api/posts/react', async (req, res) => {
     }
 });
 
-// --- SEARCH ENDPOINT ---
 app.get('/api/search', async (req, res) => {
     try {
         const rawQuery = req.query.q ? req.query.q.trim().toLowerCase() : '';
@@ -398,6 +521,9 @@ app.get('/api/search', async (req, res) => {
         const globalPostsList = await ActivePost.find({});
         const categorizedPosts = globalPostsList.map(post => {
             let relevanceRank = 0;
+            const boundaryDelta = Date.now() - new Date(post.createdAt).getTime();
+            if (boundaryDelta > 24 * 60 * 60 * 1000) return { post, relevanceRank: 0 };
+
             if (post.hashtags && post.hashtags.includes(cleanedQuery)) relevanceRank += 80;
             if (post.caption.toLowerCase().includes(cleanedQuery)) relevanceRank += 40;
             if (post.username === cleanedQuery) relevanceRank += 20;
@@ -413,7 +539,8 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-// --- CORE DISPATCH ROUTES ---
+// --- CORE AUTH ROUTING DATA LINKS ---
+
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
@@ -456,6 +583,14 @@ app.post('/api/auth/login', async (req, res) => {
         const activeUpload = await ActivePost.findOne({ username: accountMatch.username });
         await computeGlobalWeeklyRankings();
 
+        let validActivePost = null;
+        if (activeUpload) {
+            const verificationLifespan = Date.now() - new Date(activeUpload.createdAt).getTime();
+            if (verificationLifespan <= 24 * 60 * 60 * 1000) {
+                validActivePost = activeUpload;
+            }
+        }
+
         res.json({
             username: accountMatch.username,
             fullName: accountMatch.fullName,
@@ -464,6 +599,7 @@ app.post('/api/auth/login', async (req, res) => {
             status: accountMatch.status,
             country: accountMatch.country,
             avatarString: accountMatch.avatarString,
+            bannerString: accountMatch.bannerString,
             hallOfFame: accountMatch.hallOfFame,
             followers: accountMatch.followers,
             following: accountMatch.following,
@@ -480,7 +616,7 @@ app.post('/api/auth/login', async (req, res) => {
             lastMedalUsedAt: accountMatch.lastMedalUsedAt,
             lastBroccoliUsedAt: accountMatch.lastBroccoliUsedAt,
             isAdmin: accountMatch.isAdmin, 
-            activePost: activeUpload
+            activePost: validActivePost
         });
     } catch (err) {
         res.status(500).json({ error: 'Server authentication loop error.' });
@@ -489,11 +625,11 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.put('/api/profile/update', async (req, res) => {
     try {
-        const { username, fullName, bio, age, status, country, avatarString, isPrivate, hideFollowersList, allowMessagesFrom, pgFriendly, darkMode } = req.body;
+        const { username, fullName, bio, age, status, country, avatarString, bannerString, isPrivate, hideFollowersList, allowMessagesFrom, pgFriendly, darkMode } = req.body;
         
         const profile = await User.findOneAndUpdate(
             { username: username.toLowerCase() },
-            { fullName, bio, age, status, country, avatarString, isPrivate, hideFollowersList, allowMessagesFrom, pgFriendly, darkMode },
+            { fullName, bio, age, status, country, avatarString, bannerString, isPrivate, hideFollowersList, allowMessagesFrom, pgFriendly, darkMode },
             { new: true }
         );
         
@@ -608,6 +744,9 @@ app.get('/api/feed/:username', async (req, res) => {
             
             if (user.blockedUsers.includes(authorHandle)) continue;
 
+            const boundaryDelta = Date.now() - new Date(post.createdAt).getTime();
+            if (boundaryDelta > 24 * 60 * 60 * 1000) continue;
+
             if (user.pgFriendly) {
                 const combinedTextCheck = (post.caption + ' ' + post.hashtags.join(' ')).toLowerCase();
                 const holdsInappropriateFlags = bannedContentPhrases.some(phrase => combinedTextCheck.includes(phrase));
@@ -672,6 +811,9 @@ app.get('/api/messages/thread/:userA/:userB', async (req, res) => {
     try {
         const uA = req.params.userA.toLowerCase();
         const uB = req.params.userB.toLowerCase();
+
+        // Mark incoming message data nodes read upon chat feed retrieval compilation
+        await DirectMessage.updateMany({ sender: uB, receiver: uA, isRead: false }, { isRead: true });
 
         const messages = await DirectMessage.find({
             $or: [
