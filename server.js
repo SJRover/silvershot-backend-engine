@@ -171,6 +171,30 @@ app.get('/api/messages/unread-summary/:username', async (req, res) => {
     }
 });
 
+// NEW: COMPREHENSIVE CONVERSATION HISTORY EXTRACTION ROUTE
+app.get('/api/messages/conversations/:username', async (req, res) => {
+    try {
+        const user = req.params.username.toLowerCase();
+        const messages = await DirectMessage.find({
+            $or: [{ sender: user }, { receiver: user }]
+        }).sort({ createdAt: -1 });
+
+        const conversedUsers = [];
+        const seen = new Set();
+        messages.forEach(msg => {
+            const otherUser = msg.sender === user ? msg.receiver : msg.sender;
+            if (!seen.has(otherUser)) {
+                seen.add(otherUser);
+                conversedUsers.push(otherUser);
+            }
+        });
+
+        res.json(conversedUsers);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch global conversation history matrices.' });
+    }
+});
+
 app.get('/api/posts/:postId/comments', async (req, res) => {
     try {
         const { sort } = req.query;
@@ -229,7 +253,6 @@ app.post('/api/comments/:commentId/react', async (req, res) => {
         if (!targetNode) return res.status(404).json({ error: 'Comment context not found.' });
 
         const rootPost = await ActivePost.findById(targetNode.postId);
-        // Fallback validation check: allow reading but lock reaction updates if the post is archived in user showcase slots
         if (!rootPost) {
             return res.status(403).json({ error: 'Reactions are restricted for archived records.' });
         }
@@ -381,7 +404,6 @@ app.get('/api/profile/:username', async (req, res) => {
             }
         }
         
-        // Dynamically compute embedded comment counts across each Hall of Fame showcase slot item
         const verifiedHallOfFame = [];
         if (account.hallOfFame && account.hallOfFame.length > 0) {
             for (let item of account.hallOfFame) {
@@ -555,8 +577,6 @@ app.get('/api/search', async (req, res) => {
         res.status(500).json({ error: 'Search system processing failure.' });
     }
 });
-
-// --- CORE AUTH ROUTING DATA LINKS ---
 
 app.post('/api/auth/register', async (req, res) => {
     try {
@@ -744,6 +764,26 @@ app.post('/api/relations/follow', async (req, res) => {
         }
     } catch (err) {
         res.status(500).json({ error: 'Follow system processing failure.' });
+    }
+});
+
+app.post('/api/relations/unfollow', async (req, res) => {
+    try {
+        const { sender, target } = req.body;
+        const actor = await User.findOne({ username: sender.toLowerCase() });
+        const recipient = await User.findOne({ username: target.toLowerCase() });
+
+        if (!actor || !recipient) return res.status(404).json({ error: 'Profiles not found.' });
+
+        recipient.followers = recipient.followers.filter(u => u !== actor.username);
+        actor.following = actor.following.filter(u => u !== recipient.username);
+
+        await recipient.save();
+        await actor.save();
+
+        res.json({ message: 'Unfollow processed successfully.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Unfollow system processing failure.' });
     }
 });
 
